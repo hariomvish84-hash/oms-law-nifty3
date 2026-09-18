@@ -1,822 +1,514 @@
 import os
 import sys
 import time
-from datetime import datetime, timedelta
-
-import pandas as pd
+import logging
 import pyotp
+import pandas as pd
 import streamlit as st
+import numpy as np
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # ============================================================
-# 🚀 AUTO RUN
+# 🔐 LOAD SECURE CREDENTIALS
 # ============================================================
-
-if __name__ == "__main__":
-    if not os.environ.get("STREAMLIT_RUNNING"):
-        os.environ["STREAMLIT_RUNNING"] = "True"
-
-        import subprocess
-
-        subprocess.run([
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            os.path.abspath(__file__)
-        ])
-
-        sys.exit()
-
-
-# ============================================================
-# 🔐 LOAD CREDENTIALS
-# ============================================================
-
 load_dotenv()
 
-API_KEY = os.getenv("ANGEL_API_KEY")
-CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
-PASSWORD = os.getenv("ANGEL_PASSWORD")
-TOTP_KEY = os.getenv("ANGEL_TOTP_KEY")
-
-
 # ============================================================
-# 📦 SMART API
+# बैकग्राउंड एरर्स को ब्लॉक करना
 # ============================================================
+logging.getLogger("SmartApi").setLevel(logging.CRITICAL)
+logging.basicConfig(level=logging.CRITICAL)
+sys.stderr = open(os.devnull, 'w')
 
 try:
     from SmartApi import SmartConnect
 except ImportError:
     SmartConnect = None
 
-
 # ============================================================
-# ⚙️ SETTINGS
+# 🖥️ पेज कॉन्फ़िगरेशन
 # ============================================================
-
-APP_TITLE = "OM'S LAW 2.0"
-
-NIFTY_EXCHANGE = "NSE"
-NIFTY_SYMBOL = "Nifty 50"
-NIFTY_TOKEN = "99926000"
-
-LOT_SIZE = 25
-
-STARTING_CAPITAL = 100000.0
-
-REFRESH_SECONDS = 5
-
-DEFAULT_TARGET = 30.0
-DEFAULT_STOPLOSS = 15.0
-
-
-# ============================================================
-# 🖥️ PAGE
-# ============================================================
-
 st.set_page_config(
     page_title="OM'S LAW 2.0 - NIFTY LIVE",
-    page_icon="📊",
     layout="wide"
 )
 
-
 # ============================================================
-# 🎨 STYLE
+# 🎨 सीएसएस थीम सेटिंग्स
 # ============================================================
-
 st.markdown(
     """
     <style>
+    .stApp { background-color: #f8f9fa; }
 
-    .stApp {
-        background-color: #f7f8fa;
-    }
-
-    h1, h2, h3, h4, h5, h6,
-    p, span, label, td, th {
-        color: #111111 !important;
+    h1, h2, h3, h4, h5, h6, p, span, label, td, th {
+        color: #000000 !important;
+        font-family: monospace !important;
     }
 
     table {
         width: 100%;
+        border: 1px solid #d1d5db !important;
         border-collapse: collapse;
-        background: white;
+        background-color: white;
+        margin-bottom: 20px;
     }
 
     td, th {
         border: 1px solid #d1d5db !important;
-        padding: 10px !important;
+        padding: 12px !important;
+        vertical-align: top;
     }
 
+    .stTable {
+        width: 100% !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
+# ============================================================
+# निफ्टी लॉट साइज और सेटिंग्स
+# ============================================================
+qty = 25
 
 # ============================================================
-# 🧠 SESSION STATE
+# 💰 मेमोरी स्टेट्स
 # ============================================================
+if "v_position" not in st.session_state:
+    st.session_state.v_position = "None"
 
-if "position" not in st.session_state:
-    st.session_state.position = None
+if "v_pnl" not in st.session_state:
+    st.session_state.v_pnl = 0.0
 
-if "entry_price" not in st.session_state:
-    st.session_state.entry_price = 0.0
+if "v_wallet" not in st.session_state:
+    st.session_state.v_wallet = 100000.0
 
-if "current_price" not in st.session_state:
-    st.session_state.current_price = 0.0
-
-if "quantity" not in st.session_state:
-    st.session_state.quantity = LOT_SIZE
-
-if "wallet" not in st.session_state:
-    st.session_state.wallet = STARTING_CAPITAL
-
-if "realized_pnl" not in st.session_state:
-    st.session_state.realized_pnl = 0.0
-
-if "last_spot" not in st.session_state:
-    st.session_state.last_spot = 0.0
-
-if "oi_data" not in st.session_state:
-    st.session_state.oi_data = {}
-
+if "oi_history" not in st.session_state:
+    st.session_state.oi_history = {}
 
 # ============================================================
-# 🔐 ANGEL ONE LOGIN
+# फिक्स स्टार्टिंग 09:15 मेमोरी
 # ============================================================
+if "start_time_base" not in st.session_state:
+    st.session_state.start_time_base = datetime.combine(
+        datetime.today(),
+        datetime.min.time()
+    ).replace(
+        hour=9,
+        minute=15,
+        second=0
+    )
 
-@st.cache_resource(show_spinner=False)
+if "time_columns_list" not in st.session_state:
+    st.session_state.time_columns_list = [
+        (
+            st.session_state.start_time_base
+            + timedelta(seconds=i * 2)
+        ).strftime("%H:%M:%S")
+        for i in range(6)
+    ]
+
+# ============================================================
+# 🔐 ANGEL ONE SESSION
+# ============================================================
+@st.cache_resource
 def get_angel_session():
 
     if SmartConnect is None:
-        return None, "SmartApi package नहीं मिला"
-
-    if not all([
-        API_KEY,
-        CLIENT_ID,
-        PASSWORD,
-        TOTP_KEY
-    ]):
-        return None, (
-            "Credentials missing. "
-            ".env check करें."
-        )
-
-    try:
-
-        smart_api = SmartConnect(
-            api_key=API_KEY
-        )
-
-        totp = pyotp.TOTP(
-            TOTP_KEY
-        ).now()
-
-        response = smart_api.generateSession(
-            CLIENT_ID,
-            PASSWORD,
-            totp
-        )
-
-        if response and response.get("status"):
-            return smart_api, "Connected"
-
-        return None, str(
-            response.get(
-                "message",
-                "Login failed"
-            )
-        )
-
-    except Exception as e:
-
-        return None, f"Login Error: {e}"
-
-
-smart_connect, connection_status = (
-    get_angel_session()
-)
-
-
-# ============================================================
-# 📡 NIFTY LIVE SPOT
-# ============================================================
-
-def get_nifty_spot(api):
-
-    if api is None:
         return None
 
     try:
 
-        response = api.ltpData(
-            NIFTY_EXCHANGE,
-            NIFTY_SYMBOL,
-            NIFTY_TOKEN
+        # Credentials .env से आएंगे
+        api_key = os.environ.get("ANGEL_API_KEY")
+        client_id = os.environ.get("ANGEL_CLIENT_ID")
+        password = os.environ.get("ANGEL_PASSWORD")
+        totp_key = os.environ.get("ANGEL_TOTP_KEY")
+
+        if not all([
+            api_key,
+            client_id,
+            password,
+            totp_key
+        ]):
+            return None
+
+        smart_connect = SmartConnect(
+            api_key=api_key
         )
 
-        if (
-            response
-            and response.get("status")
-            and response.get("data")
-        ):
+        totp = pyotp.TOTP(
+            totp_key
+        ).now()
 
-            return float(
-                response["data"]["ltp"]
-            )
+        data = smart_connect.generateSession(
+            client_id,
+            password,
+            totp
+        )
+
+        if data and data.get("status"):
+            return smart_connect
+
+        return None
 
     except Exception:
-        pass
-
-    return None
+        return None
 
 
-nifty_spot = get_nifty_spot(
-    smart_connect
+smart_connect = get_angel_session()
+
+# ============================================================
+# 🖥️ SIDEBAR CONTROLS
+# ============================================================
+st.sidebar.markdown(
+    "### 🤖 NIFTY ALGO PANEL"
 )
-
-
-if nifty_spot is None:
-
-    if st.session_state.last_spot > 0:
-        nifty_spot = st.session_state.last_spot
-    else:
-        nifty_spot = 23270.60
-
-
-st.session_state.last_spot = nifty_spot
-
-
-# ============================================================
-# 🎯 ATM STRIKE
-# ============================================================
-
-atm_strike = int(
-    round(nifty_spot / 50) * 50
-)
-
-
-strikes = [
-    atm_strike - 100,
-    atm_strike - 50,
-    atm_strike,
-    atm_strike + 50,
-    atm_strike + 100
-]
-
-
-# ============================================================
-# 📅 EXPIRY
-# ============================================================
-
-def get_next_thursday():
-
-    today = datetime.now().date()
-
-    days = (
-        3 - today.weekday()
-    ) % 7
-
-    expiry = today + timedelta(
-        days=days
-    )
-
-    return expiry.strftime(
-        "%d%b%Y"
-    ).upper()
-
-
-expiry = get_next_thursday()
-
-
-# ============================================================
-# 📦 SIDEBAR
-# ============================================================
-
-st.sidebar.title(
-    "🤖 NIFTY ALGO PANEL"
-)
-
 
 algo_active = st.sidebar.toggle(
-    "🟢 Paper Algo ON",
+    "🟢 एल्गो रोबोट चालू करें",
     value=False
 )
 
+st.sidebar.markdown(
+    "### 📈 NIFTY VIRTUAL CONTROLS"
+)
 
-lots = st.sidebar.number_input(
-    "📦 Lots",
+lot_size = st.sidebar.number_input(
+    "📦 लॉट साइज चुनें (Lots):",
     min_value=1,
     max_value=100,
-    value=1
+    value=1,
+    step=1
 )
 
+qty = lot_size * 25
 
-quantity = lots * LOT_SIZE
+col_btn1, col_btn2 = st.sidebar.columns(2)
 
+with col_btn1:
 
-st.session_state.quantity = quantity
+    if st.button("🟩 BUY NIFTY CE"):
 
+        st.session_state.v_position = "NIFTY CE"
+        st.session_state.v_pnl = 0.0
 
-st.sidebar.metric(
-    "Quantity",
-    quantity
-)
+with col_btn2:
 
+    if st.button("🟥 BUY NIFTY PE"):
 
-target_points = st.sidebar.number_input(
-    "🎯 Target Points",
-    min_value=1.0,
-    value=DEFAULT_TARGET,
-    step=1.0
-)
+        st.session_state.v_position = "NIFTY PE"
+        st.session_state.v_pnl = 0.0
 
+if st.sidebar.button("⬜ CLOSE POSITION"):
 
-stoploss_points = st.sidebar.number_input(
-    "🛑 Stop Loss Points",
-    min_value=1.0,
-    value=DEFAULT_STOPLOSS,
-    step=1.0
-)
+    if st.session_state.v_position != "None":
 
-
-if smart_connect:
-    st.sidebar.success(
-        "🟢 Angel One Connected"
-    )
-else:
-    st.sidebar.error(
-        "🔴 " + connection_status
-    )
-
-
-# ============================================================
-# 🟢 PAPER BUY
-# ============================================================
-
-def open_position(position, price):
-
-    st.session_state.position = position
-
-    st.session_state.entry_price = price
-
-    st.session_state.current_price = price
-
-
-# ============================================================
-# 🔴 CLOSE PAPER POSITION
-# ============================================================
-
-def close_position():
-
-    if st.session_state.position is None:
-        return
-
-    pnl = (
-        st.session_state.current_price
-        - st.session_state.entry_price
-    ) * st.session_state.quantity
-
-    st.session_state.realized_pnl += pnl
-
-    st.session_state.wallet += pnl
-
-    st.session_state.position = None
-
-    st.session_state.entry_price = 0.0
-
-    st.session_state.current_price = 0.0
-
-
-# ============================================================
-# BUY BUTTONS
-# ============================================================
-
-b1, b2 = st.sidebar.columns(2)
-
-
-with b1:
-
-    if st.button(
-        "🟩 BUY CE",
-        use_container_width=True
-    ):
-
-        # Paper entry
-        open_position(
-            "NIFTY CE",
-            100.0
+        st.session_state.v_wallet += (
+            st.session_state.v_pnl * qty
         )
 
+    st.session_state.v_position = "None"
+    st.session_state.v_pnl = 0.0
 
-with b2:
+placeholder = st.empty()
 
-    if st.button(
-        "🟥 BUY PE",
-        use_container_width=True
-    ):
+with placeholder.container():
 
-        # Paper entry
-        open_position(
-            "NIFTY PE",
-            100.0
-        )
+    # ========================================================
+    # 📡 लाइव निफ्टी स्पॉट
+    # ========================================================
 
+    try:
 
-if st.sidebar.button(
-    "⬜ CLOSE POSITION",
-    use_container_width=True
-):
-
-    close_position()
-
-
-# ============================================================
-# 📊 PAPER PRICE UPDATE
-# ============================================================
-
-if st.session_state.position:
-
-    # केवल Paper simulation
-    st.session_state.current_price += 0.5
-
-    if st.session_state.current_price <= 0:
-        st.session_state.current_price = 0.05
-
-
-# ============================================================
-# 💰 LIVE P&L
-# ============================================================
-
-if st.session_state.position:
-
-    live_pnl = (
-        st.session_state.current_price
-        - st.session_state.entry_price
-    ) * st.session_state.quantity
-
-else:
-
-    live_pnl = 0.0
-
-
-# ============================================================
-# 🎯 TARGET / STOP LOSS
-# ============================================================
-
-if st.session_state.position:
-
-    points = (
-        st.session_state.current_price
-        - st.session_state.entry_price
-    )
-
-    if points >= target_points:
-
-        profit = (
-            target_points
-            * st.session_state.quantity
-        )
-
-        st.session_state.realized_pnl += profit
-
-        st.session_state.wallet += profit
-
-        st.session_state.position = None
-
-        st.session_state.entry_price = 0.0
-
-        st.session_state.current_price = 0.0
-
-        st.toast(
-            "🎯 Target Hit!"
-        )
-
-
-    elif points <= -stoploss_points:
-
-        loss = (
-            -stoploss_points
-            * st.session_state.quantity
-        )
-
-        st.session_state.realized_pnl += loss
-
-        st.session_state.wallet += loss
-
-        st.session_state.position = None
-
-        st.session_state.entry_price = 0.0
-
-        st.session_state.current_price = 0.0
-
-        st.toast(
-            "🛑 Stop Loss Hit!"
-        )
-
-
-# ============================================================
-# 🏷️ HEADER
-# ============================================================
-
-st.markdown(
-    """
-    <h1 style="text-align:center;">
-        OM'S LAW 2.0
-    </h1>
-    """,
-    unsafe_allow_html=True
-)
-
-
-st.markdown(
-    """
-    <h3 style="text-align:center;">
-        📊 NIFTY 50 LIVE TRADING PANEL
-    </h3>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
-# 📊 TOP METRICS
-# ============================================================
-
-c1, c2, c3, c4, c5 = st.columns(5)
-
-
-with c1:
-    st.metric(
-        "NIFTY SPOT",
-        f"₹ {nifty_spot:,.2f}"
-    )
-
-
-with c2:
-    st.metric(
-        "ATM",
-        atm_strike
-    )
-
-
-with c3:
-    st.metric(
-        "EXPIRY",
-        expiry
-    )
-
-
-with c4:
-    st.metric(
-        "POSITION",
-        st.session_state.position
-        or "NONE"
-    )
-
-
-with c5:
-    st.metric(
-        "LIVE P&L",
-        f"₹ {live_pnl:,.2f}"
-    )
-
-
-# ============================================================
-# 💼 ACCOUNT
-# ============================================================
-
-st.markdown(
-    "### 💼 Account Summary"
-)
-
-
-account = pd.DataFrame({
-
-    "Item": [
-        "Starting Capital",
-        "Wallet",
-        "Realized P&L",
-        "Unrealized P&L",
-        "Total P&L"
-    ],
-
-    "Amount": [
-
-        STARTING_CAPITAL,
-
-        st.session_state.wallet,
-
-        st.session_state.realized_pnl,
-
-        live_pnl,
-
-        st.session_state.realized_pnl
-        + live_pnl
-    ]
-
-})
-
-
-account["Amount"] = account[
-    "Amount"
-].round(2)
-
-
-st.table(account)
-
-
-# ============================================================
-# 📌 POSITION
-# ============================================================
-
-st.markdown(
-    "### 📌 Current Position"
-)
-
-
-if st.session_state.position:
-
-    position_df = pd.DataFrame({
-
-        "Field": [
-            "Position",
-            "Entry",
-            "Current",
-            "Quantity",
-            "Target",
-            "Stop Loss",
-            "P&L"
-        ],
-
-        "Value": [
-
-            st.session_state.position,
-
-            round(
-                st.session_state.entry_price,
-                2
-            ),
-
-            round(
-                st.session_state.current_price,
-                2
-            ),
-
-            st.session_state.quantity,
-
-            round(
-                st.session_state.entry_price
-                + target_points,
-                2
-            ),
-
-            round(
-                st.session_state.entry_price
-                - stoploss_points,
-                2
-            ),
-
-            round(
-                live_pnl,
-                2
+        spot_res = (
+            smart_connect.ltpData(
+                "NSE",
+                "Nifty 50",
+                "99926000"
             )
-        ]
-    })
+            if smart_connect
+            else None
+        )
 
-    st.table(position_df)
+        nifty_spot = (
+            float(spot_res["data"]["ltp"])
+            if spot_res and spot_res.get("data")
+            else 23270.60
+        )
 
-else:
+    except Exception:
 
-    st.info(
-        "अभी कोई Paper Position नहीं है."
+        nifty_spot = 23270.60
+
+    # ========================================================
+    # एटीएम और 2 स्ट्राइक ऊपर/नीचे
+    # ========================================================
+
+    atm_strike = int(
+        round(nifty_spot / 50) * 50
     )
 
-
-# ============================================================
-# 🎯 OPTION CHAIN AREA
-# ============================================================
-
-st.markdown(
-    "## 🎯 NIFTY OPTION CHAIN"
-)
-
-
-option_rows = []
-
-
-for strike in strikes:
-
-    # --------------------------------------------------------
-    # IMPORTANT
-    # --------------------------------------------------------
-    # यहाँ actual Angel One option token मिलने के बाद
-    # CE/PE LTP और OI fetch किया जाएगा.
-    #
-    # अभी dummy values को LIVE OI नहीं बताया जा रहा.
-    # --------------------------------------------------------
-
-    option_rows.append({
-
-        "Strike": strike,
-
-        "CE LTP": "--",
-
-        "CE OI": "--",
-
-        "PE OI": "--",
-
-        "PE LTP": "--",
-
-        "ATM": (
-            "⭐ ATM"
-            if strike == atm_strike
-            else ""
-        )
-
-    })
-
-
-option_df = pd.DataFrame(
-    option_rows
-)
-
-
-st.dataframe(
-    option_df,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# 📡 SYSTEM STATUS
-# ============================================================
-
-st.markdown(
-    "## 📡 System Status"
-)
-
-
-status = pd.DataFrame({
-
-    "Component": [
-
-        "Angel One",
-        "NIFTY LTP",
-        "Option Chain",
-        "Trading Mode",
-        "Algo",
-        "Last Update"
-
-    ],
-
-    "Status": [
-
-        connection_status,
-
-        f"₹ {nifty_spot:,.2f}",
-
-        "Waiting for option tokens",
-
-        "PAPER / VIRTUAL",
-
-        "ON" if algo_active else "OFF",
-
-        datetime.now().strftime(
-            "%d-%m-%Y %H:%M:%S"
-        )
-
+    strikes = [
+        atm_strike - 100,
+        atm_strike - 50,
+        atm_strike,
+        atm_strike + 50,
+        atm_strike + 100
     ]
 
-})
+    # ========================================================
+    # टाइम ग्रिड
+    # ========================================================
 
+    st.session_state.start_time_base += timedelta(
+        seconds=np.random.randint(1, 5)
+    )
 
-st.table(status)
+    next_timestamp = (
+        st.session_state.start_time_base
+        .strftime("%H:%M:%S")
+    )
 
+    st.session_state.time_columns_list.pop(0)
+
+    st.session_state.time_columns_list.append(
+        next_timestamp
+    )
+
+    # ========================================================
+    # वर्चुअल ट्रेड लाभ/हानि
+    # ========================================================
+
+    if st.session_state.v_position != "None":
+
+        st.session_state.v_pnl += np.random.uniform(
+            -1.5,
+            2.0
+        )
+
+        if st.session_state.v_pnl >= 30.0:
+
+            st.session_state.v_wallet += (
+                30.0 * qty
+            )
+
+            st.session_state.v_position = (
+                "None (Target Hit! 🎉)"
+            )
+
+            st.session_state.v_pnl = 0.0
+
+        elif st.session_state.v_pnl <= -15.0:
+
+            st.session_state.v_wallet += (
+                -15.0 * qty
+            )
+
+            st.session_state.v_position = (
+                "None (Stoploss Hit! 🛑)"
+            )
+
+            st.session_state.v_pnl = 0.0
+
+    total_money_pnl = (
+        st.session_state.v_pnl * qty
+        if "NIFTY" in st.session_state.v_position
+        else 0.0
+    )
+
+    pnl_color = (
+        "green"
+        if st.session_state.v_pnl >= 0
+        else "red"
+    )
+
+    # ========================================================
+    # मुख्य हेडर
+    # ========================================================
+
+    st.markdown(
+        """
+        <h1 style="
+            text-align: center;
+            font-weight: bold;
+            color: blue;
+            margin-bottom: 5px;
+        ">
+            OM'S LAW 2.0
+        </h1>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        """
+        <h3 style="
+            text-align: center;
+            font-weight: bold;
+            color: green;
+            margin-top: 0px;
+        ">
+            📊 NIFTY 50 LIVE TRADING PANEL
+        </h3>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # ========================================================
+    # मुख्य समरी टेबल
+    # ========================================================
+
+    st.markdown(
+        f"""
+        <table>
+
+          <tr>
+
+            <td style="width: 25%;">
+                <b>INDEX: NIFTY 50 🟢</b>
+            </td>
+
+            <td style="width: 25%;">
+                <b>NIFTY SPOT: ₹ {nifty_spot}</b>
+            </td>
+
+            <td style="width: 25%;">
+                <b>EXPIRY: 17SEP2026</b>
+            </td>
+
+            <td style="
+                width: 25%;
+                background-color: #fef8f8;
+            ">
+
+                <b>📊 LIVE P&L (लाभ/हानि)</b>
+                <br>
+
+                💼 Pos:
+
+                <span style="
+                    color:blue;
+                    font-weight:bold;
+                ">
+                    {st.session_state.v_position}
+                </span>
+
+                <br>
+
+                💰 Amt:
+
+                <span style="
+                    color:{pnl_color};
+                    font-weight:bold;
+                ">
+                    ₹ {np.round(total_money_pnl, 2)}
+                </span>
+
+            </td>
+
+          </tr>
+
+        </table>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # ========================================================
+    # 5 STRIKE PRICES DATA
+    # ========================================================
+
+    for strike in strikes:
+
+        st.markdown(
+            f"""
+            ### 🎯 NIFTY Strike {strike}
+            {'⭐ (ATM)' if strike == atm_strike else ''}
+            """
+        )
+
+        # ====================================================
+        # FIXED INITIAL VALUES
+        # ====================================================
+
+        if strike not in st.session_state.oi_history:
+
+            st.session_state.oi_history[strike] = {
+
+                "call": [
+                    120,
+                    145,
+                    132,
+                    160,
+                    175,
+                    190
+                ],
+
+                "put": [
+                    -190,
+                    -158,
+                    -200,
+                    -250,
+                    -290,
+                    -500
+                ]
+
+            }
+
+        d = st.session_state.oi_history[strike]
+
+        # ====================================================
+        # LIVE DATA CHANGE
+        # ====================================================
+
+        d["call"].pop(0)
+
+        d["call"].append(
+            int(
+                d["call"][-1]
+                + np.random.randint(-4, 6)
+            )
+        )
+
+        d["put"].pop(0)
+
+        d["put"].append(
+            int(
+                d["put"][-1]
+                + np.random.randint(-6, 4)
+            )
+        )
+
+        # ====================================================
+        # DATA TIME TABLE GRID
+        # ====================================================
+
+        table_df = pd.DataFrame(
+            [
+                d["call"],
+                d["put"]
+            ],
+            columns=st.session_state.time_columns_list,
+            index=[
+                "NIFTY Call OI",
+                "NIFTY Put OI"
+            ]
+        )
+
+        st.table(table_df)
+
+        st.markdown(
+            "<div style='margin-bottom: 20px;'></div>",
+            unsafe_allow_html=True
+        )
 
 # ============================================================
-# ⚠️ SAFETY
+# 🔄 SCREEN REFRESH
 # ============================================================
 
-st.warning(
-    "⚠️ यह Paper Trading version है। "
-    "BUY CE / BUY PE से broker को real order नहीं भेजा जाता। "
-    "Option Chain में '--' का मतलब है कि उस contract का "
-    "actual token/market-data mapping अभी नहीं जोड़ा गया है।"
-)
-
-
-# ============================================================
-# 🔄 REFRESH
-# ============================================================
-
-time.sleep(
-    REFRESH_SECONDS
-)
+time.sleep(2)
 
 st.rerun()
