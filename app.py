@@ -7,42 +7,68 @@ import pandas as pd
 import streamlit as st
 import numpy as np
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
 # ============================================================
-# 🔐 LOAD SECURE CREDENTIALS
+# 🚀 AUTO-RUN SETTING
 # ============================================================
-load_dotenv()
+if __name__ == "__main__":
+    if not os.environ.get("STREAMLIT_RUNNING"):
+        os.environ["STREAMLIT_RUNNING"] = "True"
+
+        import subprocess
+
+        subprocess.run([
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            os.path.abspath(__file__)
+        ])
+
+        sys.exit()
+
 
 # ============================================================
-# बैकग्राउंड एरर्स को ब्लॉक करना
+# 🔇 LOGGING
 # ============================================================
 logging.getLogger("SmartApi").setLevel(logging.CRITICAL)
 logging.basicConfig(level=logging.CRITICAL)
-sys.stderr = open(os.devnull, 'w')
 
+# NOTE:
+# sys.stderr को बंद नहीं किया गया है ताकि वास्तविक errors दिखाई दें.
+
+
+# ============================================================
+# 📡 ANGEL ONE SMART API
+# ============================================================
 try:
     from SmartApi import SmartConnect
 except ImportError:
     SmartConnect = None
 
+
 # ============================================================
-# 🖥️ पेज कॉन्फ़िगरेशन
+# 🖥️ PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(
     page_title="OM'S LAW 2.0 - NIFTY LIVE",
     layout="wide"
 )
 
+
 # ============================================================
-# 🎨 सीएसएस थीम सेटिंग्स
+# 🎨 CSS THEME
 # ============================================================
 st.markdown(
     """
     <style>
-    .stApp { background-color: #f8f9fa; }
 
-    h1, h2, h3, h4, h5, h6, p, span, label, td, th {
+    .stApp {
+        background-color: #f8f9fa;
+    }
+
+    h1, h2, h3, h4, h5, h6,
+    p, span, label, td, th {
         color: #000000 !important;
         font-family: monospace !important;
     }
@@ -64,18 +90,21 @@ st.markdown(
     .stTable {
         width: 100% !important;
     }
+
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ============================================================
-# निफ्टी लॉट साइज और सेटिंग्स
-# ============================================================
-qty = 25
 
 # ============================================================
-# 💰 मेमोरी स्टेट्स
+# ⚙️ BASIC SETTINGS
+# ============================================================
+BASE_LOT_SIZE = 25
+
+
+# ============================================================
+# 💾 SESSION STATE
 # ============================================================
 if "v_position" not in st.session_state:
     st.session_state.v_position = "None"
@@ -89,17 +118,16 @@ if "v_wallet" not in st.session_state:
 if "oi_history" not in st.session_state:
     st.session_state.oi_history = {}
 
-# ============================================================
-# फिक्स स्टार्टिंग 09:15 मेमोरी
-# ============================================================
 if "start_time_base" not in st.session_state:
-    st.session_state.start_time_base = datetime.combine(
-        datetime.today(),
-        datetime.min.time()
-    ).replace(
-        hour=9,
-        minute=15,
-        second=0
+    st.session_state.start_time_base = (
+        datetime.combine(
+            datetime.today(),
+            datetime.min.time()
+        ).replace(
+            hour=9,
+            minute=15,
+            second=0
+        )
     )
 
 if "time_columns_list" not in st.session_state:
@@ -111,8 +139,9 @@ if "time_columns_list" not in st.session_state:
         for i in range(6)
     ]
 
+
 # ============================================================
-# 🔐 ANGEL ONE SESSION
+# 🔐 ANGEL ONE LOGIN
 # ============================================================
 @st.cache_resource
 def get_angel_session():
@@ -121,8 +150,7 @@ def get_angel_session():
         return None
 
     try:
-
-        # Credentials .env से आएंगे
+        # Environment variables से credentials लें
         api_key = os.environ.get("ANGEL_API_KEY")
         client_id = os.environ.get("ANGEL_CLIENT_ID")
         password = os.environ.get("ANGEL_PASSWORD")
@@ -140,9 +168,7 @@ def get_angel_session():
             api_key=api_key
         )
 
-        totp = pyotp.TOTP(
-            totp_key
-        ).now()
+        totp = pyotp.TOTP(totp_key).now()
 
         data = smart_connect.generateSession(
             client_id,
@@ -155,18 +181,21 @@ def get_angel_session():
 
         return None
 
-    except Exception:
+    except Exception as e:
+        logging.error(
+            "Angel One login failed: %s",
+            e
+        )
         return None
 
 
 smart_connect = get_angel_session()
 
+
 # ============================================================
-# 🖥️ SIDEBAR CONTROLS
+# 📊 SIDEBAR
 # ============================================================
-st.sidebar.markdown(
-    "### 🤖 NIFTY ALGO PANEL"
-)
+st.sidebar.markdown("### 🤖 NIFTY ALGO PANEL")
 
 algo_active = st.sidebar.toggle(
     "🟢 एल्गो रोबोट चालू करें",
@@ -177,6 +206,10 @@ st.sidebar.markdown(
     "### 📈 NIFTY VIRTUAL CONTROLS"
 )
 
+
+# ============================================================
+# 📦 LOT SIZE
+# ============================================================
 lot_size = st.sidebar.number_input(
     "📦 लॉट साइज चुनें (Lots):",
     min_value=1,
@@ -185,27 +218,48 @@ lot_size = st.sidebar.number_input(
     step=1
 )
 
-qty = lot_size * 25
+qty = lot_size * BASE_LOT_SIZE
 
+
+# ============================================================
+# 🟢 BUY BUTTONS
+# ============================================================
 col_btn1, col_btn2 = st.sidebar.columns(2)
 
 with col_btn1:
 
-    if st.button("🟩 BUY NIFTY CE"):
+    if st.button(
+        "🟩 BUY NIFTY CE",
+        use_container_width=True
+    ):
 
         st.session_state.v_position = "NIFTY CE"
         st.session_state.v_pnl = 0.0
 
+
 with col_btn2:
 
-    if st.button("🟥 BUY NIFTY PE"):
+    if st.button(
+        "🟥 BUY NIFTY PE",
+        use_container_width=True
+    ):
 
         st.session_state.v_position = "NIFTY PE"
         st.session_state.v_pnl = 0.0
 
-if st.sidebar.button("⬜ CLOSE POSITION"):
 
-    if st.session_state.v_position != "None":
+# ============================================================
+# ⬜ CLOSE POSITION
+# ============================================================
+if st.sidebar.button(
+    "⬜ CLOSE POSITION",
+    use_container_width=True
+):
+
+    if st.session_state.v_position in [
+        "NIFTY CE",
+        "NIFTY PE"
+    ]:
 
         st.session_state.v_wallet += (
             st.session_state.v_pnl * qty
@@ -214,14 +268,17 @@ if st.sidebar.button("⬜ CLOSE POSITION"):
     st.session_state.v_position = "None"
     st.session_state.v_pnl = 0.0
 
+
+# ============================================================
+# 📡 MAIN DISPLAY
+# ============================================================
 placeholder = st.empty()
 
 with placeholder.container():
 
     # ========================================================
-    # 📡 लाइव निफ्टी स्पॉट
+    # 📡 LIVE NIFTY SPOT
     # ========================================================
-
     try:
 
         spot_res = (
@@ -234,20 +291,32 @@ with placeholder.container():
             else None
         )
 
-        nifty_spot = (
-            float(spot_res["data"]["ltp"])
-            if spot_res and spot_res.get("data")
-            else 23270.60
-        )
+        if (
+            spot_res
+            and spot_res.get("data")
+            and spot_res["data"].get("ltp") is not None
+        ):
 
-    except Exception:
+            nifty_spot = float(
+                spot_res["data"]["ltp"]
+            )
+
+        else:
+            nifty_spot = 23270.60
+
+    except Exception as e:
+
+        logging.error(
+            "NIFTY LTP error: %s",
+            e
+        )
 
         nifty_spot = 23270.60
 
-    # ========================================================
-    # एटीएम और 2 स्ट्राइक ऊपर/नीचे
-    # ========================================================
 
+    # ========================================================
+    # 🎯 ATM STRIKE
+    # ========================================================
     atm_strike = int(
         round(nifty_spot / 50) * 50
     )
@@ -260,10 +329,10 @@ with placeholder.container():
         atm_strike + 100
     ]
 
-    # ========================================================
-    # टाइम ग्रिड
-    # ========================================================
 
+    # ========================================================
+    # ⏱️ TIME GRID
+    # ========================================================
     st.session_state.start_time_base += timedelta(
         seconds=np.random.randint(1, 5)
     )
@@ -279,17 +348,23 @@ with placeholder.container():
         next_timestamp
     )
 
-    # ========================================================
-    # वर्चुअल ट्रेड लाभ/हानि
-    # ========================================================
 
-    if st.session_state.v_position != "None":
+    # ========================================================
+    # 💰 VIRTUAL P&L
+    # ========================================================
+    if st.session_state.v_position in [
+        "NIFTY CE",
+        "NIFTY PE"
+    ]:
 
         st.session_state.v_pnl += np.random.uniform(
             -1.5,
             2.0
         )
 
+        # ----------------------------
+        # 🎯 TARGET
+        # ----------------------------
         if st.session_state.v_pnl >= 30.0:
 
             st.session_state.v_wallet += (
@@ -302,6 +377,10 @@ with placeholder.container():
 
             st.session_state.v_pnl = 0.0
 
+
+        # ----------------------------
+        # 🛑 STOPLOSS
+        # ----------------------------
         elif st.session_state.v_pnl <= -15.0:
 
             st.session_state.v_wallet += (
@@ -314,9 +393,16 @@ with placeholder.container():
 
             st.session_state.v_pnl = 0.0
 
+
+    # ========================================================
+    # 💵 TOTAL MONEY P&L
+    # ========================================================
     total_money_pnl = (
         st.session_state.v_pnl * qty
-        if "NIFTY" in st.session_state.v_position
+        if st.session_state.v_position in [
+            "NIFTY CE",
+            "NIFTY PE"
+        ]
         else 0.0
     )
 
@@ -326,17 +412,17 @@ with placeholder.container():
         else "red"
     )
 
-    # ========================================================
-    # मुख्य हेडर
-    # ========================================================
 
+    # ========================================================
+    # 🏷️ HEADER
+    # ========================================================
     st.markdown(
         """
         <h1 style="
-            text-align: center;
-            font-weight: bold;
-            color: blue;
-            margin-bottom: 5px;
+            text-align:center;
+            font-weight:bold;
+            color:blue;
+            margin-bottom:5px;
         ">
             OM'S LAW 2.0
         </h1>
@@ -344,13 +430,14 @@ with placeholder.container():
         unsafe_allow_html=True
     )
 
+
     st.markdown(
         """
         <h3 style="
-            text-align: center;
-            font-weight: bold;
-            color: green;
-            margin-top: 0px;
+            text-align:center;
+            font-weight:bold;
+            color:green;
+            margin-top:0px;
         ">
             📊 NIFTY 50 LIVE TRADING PANEL
         </h3>
@@ -358,82 +445,95 @@ with placeholder.container():
         unsafe_allow_html=True
     )
 
-    # ========================================================
-    # मुख्य समरी टेबल
-    # ========================================================
 
-
+    # ========================================================
+    # 📊 SUMMARY BOX
+    # ========================================================
     st.markdown(
         f"""
         <table>
 
-          <tr>
+            <tr>
 
-            <td style="width: 25%;">
-                <b>INDEX: NIFTY 50 🟢</b>
-            </td>
+                <td style="width:25%;">
+                    <b>INDEX: NIFTY 50 🟢</b>
+                </td>
 
-            <td style="width: 25%;">
-                <b>NIFTY SPOT: ₹ {nifty_spot}</b>
-            </td>
+                <td style="width:25%;">
+                    <b>NIFTY SPOT: ₹ {nifty_spot:.2f}</b>
+                </td>
 
-            <td style="width: 25%;">
-                <b>EXPIRY: 17SEP2026</b>
-            </td>
+                <td style="width:25%;">
+                    <b>EXPIRY: 17SEP2026</b>
+                </td>
 
-            <td style="
-                width: 25%;
-                background-color: #fef8f8;
-            ">
-
-                <b>📊 LIVE P&L (लाभ/हानि)</b>
-                <br>
-
-                💼 Pos:
-
-                <span style="
-                    color:blue;
-                    font-weight:bold;
+                <td style="
+                    width:25%;
+                    background-color:#fef8f8;
                 ">
-                    {st.session_state.v_position}
-                </span>
 
-                <br>
+                    <b>📊 LIVE P&L (लाभ/हानि)</b>
+                    <br>
 
-                💰 Amt:
+                    💼 Pos:
+                    <span style="
+                        color:blue;
+                        font-weight:bold;
+                    ">
+                        {st.session_state.v_position}
+                    </span>
 
-                <span style="
-                    color:{pnl_color};
-                    font-weight:bold;
-                ">
-                    ₹ {np.round(total_money_pnl, 2)}
-                </span>
+                    <br>
 
-            </td>
+                    💰 Amt:
+                    <span style="
+                        color:{pnl_color};
+                        font-weight:bold;
+                    ">
+                        ₹ {total_money_pnl:.2f}
+                    </span>
 
-          </tr>
+                    <br>
+
+                    💼 Wallet:
+                    <b>
+                        ₹ {st.session_state.v_wallet:.2f}
+                    </b>
+
+                </td>
+
+            </tr>
 
         </table>
         """,
         unsafe_allow_html=True
     )
-    # ========================================================
-    # 5 STRIKE PRICES DATA
-    # ========================================================
 
+
+    # ========================================================
+    # 📈 STRIKE TABLES
+    # ========================================================
     for strike in strikes:
+
+        atm_text = (
+            " ⭐ (ATM)"
+            if strike == atm_strike
+            else ""
+        )
 
         st.markdown(
             f"""
-            ### 🎯 NIFTY Strike {strike}
-            {'⭐ (ATM)' if strike == atm_strike else ''}
-            """
+            <h3>
+                🎯 NIFTY Strike {strike}{atm_text}
+            </h3>
+            """,
+            unsafe_allow_html=True
         )
 
-        # ====================================================
-        # FIXED INITIAL VALUES
-        # ====================================================
 
+        # ====================================================
+        # 🛠️ INITIAL OI DATA
+        # ====================================================
         if strike not in st.session_state.oi_history:
 
             st.session_state.oi_history[strike] = {
@@ -458,12 +558,13 @@ with placeholder.container():
 
             }
 
+
         d = st.session_state.oi_history[strike]
 
-        # ====================================================
-        # LIVE DATA CHANGE
-        # ====================================================
 
+        # ====================================================
+        # 📈 CALL OI UPDATE
+        # ====================================================
         d["call"].pop(0)
 
         d["call"].append(
@@ -473,6 +574,10 @@ with placeholder.container():
             )
         )
 
+
+        # ====================================================
+        # 📉 PUT OI UPDATE
+        # ====================================================
         d["put"].pop(0)
 
         d["put"].append(
@@ -482,16 +587,18 @@ with placeholder.container():
             )
         )
 
-        # ====================================================
-        # DATA TIME TABLE GRID
-        # ====================================================
 
+        # ====================================================
+        # 📊 TABLE
+        # ====================================================
         table_df = pd.DataFrame(
             [
                 d["call"],
                 d["put"]
             ],
+
             columns=st.session_state.time_columns_list,
+
             index=[
                 "NIFTY Call OI",
                 "NIFTY Put OI"
@@ -501,14 +608,13 @@ with placeholder.container():
         st.table(table_df)
 
         st.markdown(
-            "<div style='margin-bottom: 20px;'></div>",
+            "<div style='margin-bottom:20px;'></div>",
             unsafe_allow_html=True
         )
 
-# ============================================================
-# 🔄 SCREEN REFRESH
-# ============================================================
 
+# ============================================================
+# 🔄 AUTO REFRESH
+# ============================================================
 time.sleep(2)
-
 st.rerun()
